@@ -1,5 +1,9 @@
 # Changelog
 
+## 未发布
+
+- 增加依赖 SDK 公共 API 的维护上位机 `tools/tiray_host`（构建开关 `-DTIRAY_SDK_BUILD_HOST=ON`，目标 `tiray_host`），用于维护和 SDK 回归；不合并研发自有协议栈 `pa_host` / `pa_controller`。
+
 ## 0.1.0
 
 - 冻结 C99 业务 API 和 C++17 RAII API；

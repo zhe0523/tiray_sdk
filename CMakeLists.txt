@@ -74,6 +74,18 @@ install(FILES
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/tiray_sdk"
 )
 
+option(TIRAY_SDK_BUILD_HOST "Build tiray_host maintenance tool (SDK public API only)" OFF)
+if(TIRAY_SDK_BUILD_HOST)
+    enable_language(CXX)
+    add_executable(tiray_host tools/tiray_host/main.cpp)
+    target_link_libraries(tiray_host PRIVATE tiray_sdk)
+    target_include_directories(tiray_host PRIVATE include)
+    target_compile_features(tiray_host PRIVATE cxx_std_17)
+    if(NOT MSVC)
+        target_compile_options(tiray_host PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
 option(TIRAY_SDK_BUILD_EXAMPLES "Build SDK examples" OFF)
 if(TIRAY_SDK_BUILD_EXAMPLES)
     enable_language(CXX)

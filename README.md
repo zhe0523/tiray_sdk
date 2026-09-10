@@ -21,6 +21,15 @@ cd build && ctest --output-on-failure
 cmake -S . -B build -DTIRAY_SDK_INTERNAL_BUILD=ON -DTIRAY_SDK_BUILD_EXAMPLES=ON
 ```
 
+维护上位机 `tiray_host`（依赖 SDK 公共 API 的维护/回归工具，默认关闭，不进客户包）：
+
+```bash
+cmake -S . -B build -DTIRAY_SDK_BUILD_HOST=ON
+cmake --build build   # 目标 tiray_host，用法见 tools/tiray_host/README.md
+```
+
+研发自有协议栈工具 `pa_host` / `pa_controller` 不在本仓库；`tiray_host` 只用于维护和 SDK 回归。
+
 客户交付包：
 
 ```bash
