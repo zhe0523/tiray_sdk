@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 内部打包：Release 构建客户版（不要加 TIRAY_SDK_INTERNAL_BUILD）。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

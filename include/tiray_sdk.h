@@ -2,10 +2,8 @@
 #define TIRAY_SDK_H
 
 /*
- * TiRay 43108 SDK 公共接口第一阶段定义。
- *
- * 该头文件只使用 C99 基础类型，不依赖 Qt、串口库或平台 GUI 框架。
- * 后续 C++/Qt 封装只能建立在这些稳定接口之上。
+ * TiRay 43108 SDK 公共 C99 接口。
+ * 不依赖 Qt。客户集成说明见安装包文档目录。
  */
 
 #include <stdint.h>
@@ -41,6 +39,35 @@ typedef enum tiray_sdk_profile {
     TIRAY_SDK_PROFILE_INTERNAL = 1,
 } tiray_sdk_profile_t;
 
+/* 与下位机 STATUS 字段 0x0200 一致。 */
+typedef enum tiray_work_mode {
+    TIRAY_WORK_MODE_IDLE = 0,
+    TIRAY_WORK_MODE_AED = 2,
+    TIRAY_WORK_MODE_SYNC_OUT = 3,
+    TIRAY_WORK_MODE_SYNC_IN = 5,
+    TIRAY_WORK_MODE_PREP = 6,
+    TIRAY_WORK_MODE_CONTINUOUS = 7,
+    TIRAY_WORK_MODE_INNER = 8,
+    TIRAY_WORK_MODE_FREE_SYNC = 9,
+    TIRAY_WORK_MODE_DDR = 10,
+} tiray_work_mode_t;
+
+/* 与下位机 STATUS 字段 0x0201 一致。 */
+typedef enum tiray_work_state {
+    TIRAY_WORK_STATE_STOPPED = 0,
+    TIRAY_WORK_STATE_IDLE_WAIT = 1,
+    TIRAY_WORK_STATE_IDLE_CLEANING = 2,
+    TIRAY_WORK_STATE_EXPOSURE_WINDOW = 3,
+    TIRAY_WORK_STATE_BRIGHT_CAPTURE = 4,
+    TIRAY_WORK_STATE_DARK_WINDOW = 5,
+    TIRAY_WORK_STATE_DARK_CAPTURE = 6,
+    TIRAY_WORK_STATE_DYNAMIC_STARTING = 7,
+    TIRAY_WORK_STATE_DYNAMIC_RUNNING = 8,
+    TIRAY_WORK_STATE_DYNAMIC_STOPPING = 9,
+    TIRAY_WORK_STATE_DYNAMIC_COMPLETED = 10,
+    TIRAY_WORK_STATE_ERROR = 11,
+} tiray_work_state_t;
+
 typedef struct tiray_retry_config {
     uint32_t response_timeout_ms; /* 默认 500 */
     uint32_t max_retries;         /* 默认 2 */
@@ -50,7 +77,7 @@ typedef struct tiray_sdk_config {
     const char* rs422_device;
     uint32_t rs422_baudrate; /* 默认 115200 */
     tiray_retry_config_t retry;
-    tiray_sdk_profile_t profile; /* 默认对外版；内部版允许访问全部配置组 */
+    tiray_sdk_profile_t profile; /* 客户保持 TIRAY_SDK_PROFILE_EXTERNAL */
 } tiray_sdk_config_t;
 
 typedef struct tiray_sdk tiray_sdk_t;
@@ -93,7 +120,7 @@ typedef struct tiray_static_config {
 } tiray_static_config_t;
 
 typedef struct tiray_dynamic_config {
-    uint32_t cycle;
+    uint32_t cycle; /* 必须 >0 */
     uint32_t image_start_addr;
     uint32_t image_end_addr;
     uint32_t start_timeout_ms;
@@ -106,7 +133,7 @@ typedef struct tiray_dynamic_config {
 typedef struct tiray_cal_status {
     uint32_t task_id;
     uint32_t task_kind;
-    uint32_t task_state;
+    uint32_t task_state; /* 0空闲 1运行 2停止中 3成功 4失败 5取消 */
     uint32_t last_error;
     uint32_t progress_current;
     uint32_t progress_total;
@@ -125,17 +152,17 @@ typedef struct tiray_image_upload_status {
 } tiray_image_upload_status_t;
 
 typedef struct tiray_pcie_config {
-    const char* event_device;
-    const char* c2h_device;
-    const char* bar0_resource;
-    uint32_t wait_timeout_ms;
-    uint32_t fallback_rows;
-    uint32_t fallback_columns;
+    const char* event_device;   /* 默认 /dev/idma0_event_0 */
+    const char* c2h_device;     /* 默认 /dev/idma0_c2h_0 */
+    const char* bar0_resource;  /* NULL=自动发现；指针须在接收器生命周期内有效 */
+    uint32_t wait_timeout_ms;   /* wait_frame 等事件；默认 1000 */
+    uint32_t fallback_rows;     /* 元数据无效时回退，默认 7680 */
+    uint32_t fallback_columns;  /* 默认 3072 */
 } tiray_pcie_config_t;
 
 typedef struct tiray_image_frame {
-    uint8_t* data;
-    size_t data_capacity;
+    uint8_t* data;            /* wait_frame：调用者提供；回调：仅回调期间有效 */
+    size_t data_capacity;     /* 至少 rows*columns*2 */
     size_t data_length;
     uint32_t rows;
     uint32_t columns;
@@ -154,6 +181,8 @@ TIRAY_SDK_API void tiray_sdk_destroy(tiray_sdk_t* sdk);
 TIRAY_SDK_API tiray_status_t tiray_sdk_open(tiray_sdk_t* sdk);
 TIRAY_SDK_API void tiray_sdk_close(tiray_sdk_t* sdk);
 TIRAY_SDK_API int tiray_sdk_is_open(const tiray_sdk_t* sdk);
+/* 最近一次 ERROR 帧中 TLV 0x0002；无错误时为 0。 */
+TIRAY_SDK_API uint32_t tiray_sdk_last_device_error(const tiray_sdk_t* sdk);
 /* 异步任务持有 SDK 指针；销毁 SDK 前必须先 wait/destroy 所有任务。 */
 TIRAY_SDK_API tiray_status_t tiray_sdk_ping_async(tiray_sdk_t* sdk,
                                                    tiray_async_callback_t callback,
@@ -194,6 +223,7 @@ TIRAY_SDK_API tiray_status_t tiray_img_upload_config(tiray_sdk_t* sdk,
 TIRAY_SDK_API tiray_status_t tiray_img_upload_start(tiray_sdk_t* sdk);
 TIRAY_SDK_API tiray_status_t tiray_img_upload_query(tiray_sdk_t* sdk,
                                                     tiray_image_upload_status_t* status);
+/* 对外版仅允许 group_id 为 1 或 5；新代码请用 get/set_static|dynamic_config。 */
 TIRAY_SDK_API tiray_status_t tiray_get_config_group(tiray_sdk_t* sdk,
                                                      uint16_t group_id,
                                                      tiray_config_item_t* items,

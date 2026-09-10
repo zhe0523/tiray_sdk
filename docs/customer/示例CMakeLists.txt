@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(tiray_customer_demo LANGUAGES CXX)
+find_package(tiray_sdk REQUIRED)
+add_executable(tiray_customer_demo customer_demo.cpp)
+target_link_libraries(tiray_customer_demo PRIVATE tiray::tiray_sdk)
+target_compile_features(tiray_customer_demo PRIVATE cxx_std_17)
