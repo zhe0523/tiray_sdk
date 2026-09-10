@@ -17,7 +17,9 @@
 
 struct tiray_sdk {
     tiray_sdk_config_t config;
+    char* rs422_device_storage;
     uint32_t next_sequence;
+    uint32_t last_device_error;
 #ifndef _WIN32
     int fd;
     pthread_mutex_t mutex;
@@ -152,9 +154,18 @@ tiray_sdk_t* tiray_sdk_create(const tiray_sdk_config_t* config) {
     if (sdk == NULL) return NULL;
     sdk->config = defaults;
     sdk->next_sequence = 1u;
+    if (defaults.rs422_device != NULL) {
+        sdk->rs422_device_storage = strdup(defaults.rs422_device);
+        if (sdk->rs422_device_storage == NULL) {
+            free(sdk);
+            return NULL;
+        }
+        sdk->config.rs422_device = sdk->rs422_device_storage;
+    }
 #ifndef _WIN32
     sdk->fd = -1;
     if (pthread_mutex_init(&sdk->mutex, NULL) != 0) {
+        free(sdk->rs422_device_storage);
         free(sdk);
         return NULL;
     }
@@ -168,6 +179,7 @@ void tiray_sdk_destroy(tiray_sdk_t* sdk) {
 #ifndef _WIN32
     pthread_mutex_destroy(&sdk->mutex);
 #endif
+    free(sdk->rs422_device_storage);
     free(sdk);
 }
 
@@ -219,9 +231,11 @@ tiray_status_t tiray_sdk_open(tiray_sdk_t* sdk) {
     cfsetospeed(&tio, speed);
     tio.c_cflag |= CLOCAL | CREAD;
     tio.c_cflag &= ~(CSTOPB | PARENB | CRTSCTS);
+    tio.c_cflag |= CS8;
     if (tcsetattr(sdk->fd, TCSANOW, &tio) != 0) {
         close(sdk->fd); sdk->fd = -1; pthread_mutex_unlock(&sdk->mutex); return TIRAY_STATUS_IO_ERROR;
     }
+    (void)tcflush(sdk->fd, TCIOFLUSH);
     pthread_mutex_unlock(&sdk->mutex);
     return TIRAY_STATUS_OK;
 #endif
@@ -235,6 +249,10 @@ void tiray_sdk_close(tiray_sdk_t* sdk) {
     sdk->fd = -1;
     pthread_mutex_unlock(&sdk->mutex);
 #endif
+}
+
+uint32_t tiray_sdk_last_device_error(const tiray_sdk_t* sdk) {
+    return sdk != NULL ? sdk->last_device_error : 0u;
 }
 
 int tiray_sdk_is_open(const tiray_sdk_t* sdk) {
@@ -299,7 +317,24 @@ static tiray_status_t read_response(int fd, uint32_t timeout_ms, uint32_t sequen
                 memcpy(response->payload, frame.payload, frame.payload_length);
             else if (frame.payload_length != 0u)
                 return TIRAY_STATUS_INVALID_ARGUMENT;
-            if (frame.message_type == TIRAY_MSG_ERROR) return TIRAY_STATUS_DEVICE_ERROR;
+            if (frame.message_type == TIRAY_MSG_ERROR) {
+                size_t pos = 0u;
+                while (pos + 4u <= frame.payload_length) {
+                    const uint16_t type = read_le16(frame.payload + pos);
+                    const uint16_t item_length = read_le16(frame.payload + pos + 2u);
+                    pos += 4u;
+                    if (pos + item_length > frame.payload_length) break;
+                    if (type == 0x0002u && item_length >= 2u) {
+                        if (item_length >= 4u)
+                            response->device_error = read_le32(frame.payload + pos);
+                        else
+                            response->device_error = read_le16(frame.payload + pos);
+                        break;
+                    }
+                    pos += item_length;
+                }
+                return TIRAY_STATUS_DEVICE_ERROR;
+            }
             return TIRAY_STATUS_OK;
         }
         if (start != 0u) { memmove(buffer, buffer + start, length - start); length -= start; }
@@ -330,11 +365,60 @@ tiray_status_t tiray_sdk_request(tiray_sdk_t* sdk,
     if (status != TIRAY_STATUS_OK) { pthread_mutex_unlock(&sdk->mutex); return status; }
     const uint32_t sequence = frame.sequence;
     sdk->next_sequence = sdk->next_sequence == UINT32_MAX ? 1u : sdk->next_sequence + 1u;
-    for (uint32_t attempt = 0u; attempt <= sdk->config.retry.max_retries; ++attempt) {
+    uint32_t retries = sdk->config.retry.max_retries;
+    uint32_t timeout_ms = sdk->config.retry.response_timeout_ms;
+    switch (command) {
+        case TIRAY_CMD_START_STATIC_CAPTURE:
+            timeout_ms = 30000u;
+            break;
+        case TIRAY_CMD_START_DYNAMIC:
+            timeout_ms = 5000u;
+            break;
+        case TIRAY_CMD_STOP_DYNAMIC:
+            timeout_ms = 15000u;
+            break;
+        case TIRAY_CMD_CAL_OFFSET_CAPTURE:
+        case TIRAY_CMD_CAL_OFFSET_BUILD:
+        case TIRAY_CMD_CAL_GAIN_CAPTURE:
+        case TIRAY_CMD_CAL_GAIN_BUILD:
+        case TIRAY_CMD_IMG_UPLOAD_START:
+            timeout_ms = 30000u;
+            break;
+        default:
+            break;
+    }
+    switch (command) {
+        case TIRAY_CMD_REBOOT:
+        case TIRAY_CMD_START_STATIC_CAPTURE:
+        case TIRAY_CMD_START_DYNAMIC:
+        case TIRAY_CMD_STOP_DYNAMIC:
+        case TIRAY_CMD_SET_CONFIG_GROUP:
+        case TIRAY_CMD_CAL_OFFSET_BEGIN:
+        case TIRAY_CMD_CAL_OFFSET_CAPTURE:
+        case TIRAY_CMD_CAL_OFFSET_BUILD:
+        case TIRAY_CMD_CAL_OFFSET_CANCEL:
+        case TIRAY_CMD_CAL_GAIN_BEGIN:
+        case TIRAY_CMD_CAL_GAIN_CAPTURE:
+        case TIRAY_CMD_CAL_GAIN_BUILD:
+        case TIRAY_CMD_CAL_GAIN_CANCEL:
+        case TIRAY_CMD_IMG_UPLOAD_CONFIG:
+        case TIRAY_CMD_IMG_UPLOAD_START:
+            retries = 0u;
+            break;
+        default:
+            break;
+    }
+    for (uint32_t attempt = 0u; attempt <= retries; ++attempt) {
         status = write_all(sdk->fd, encoded, encoded_length);
         if (status != TIRAY_STATUS_OK) break;
-        status = read_response(sdk->fd, sdk->config.retry.response_timeout_ms, sequence, command, response);
+        status = read_response(sdk->fd, timeout_ms, sequence, command, response);
         if (status != TIRAY_STATUS_TIMEOUT) break;
+    }
+    sdk->last_device_error = response->device_error;
+    if (status == TIRAY_STATUS_DEVICE_ERROR) {
+        if (response->device_error == 0x0002u) status = TIRAY_STATUS_INVALID_ARGUMENT;
+        else if (response->device_error == 0x0005u) status = TIRAY_STATUS_TIMEOUT;
+        else if (response->device_error == 0x0008u) status = TIRAY_STATUS_BUSY;
     }
     pthread_mutex_unlock(&sdk->mutex);
     return status;
@@ -444,7 +528,7 @@ tiray_status_t tiray_get_config_group(tiray_sdk_t* sdk, uint16_t group_id,
                                        size_t* item_count) {
     if (sdk == NULL || item_count == NULL || (items == NULL && item_capacity != 0u)) return TIRAY_STATUS_INVALID_ARGUMENT;
     if (sdk->config.profile == TIRAY_SDK_PROFILE_EXTERNAL && group_id != 1u && group_id != 5u)
-        return TIRAY_STATUS_DEVICE_ERROR;
+        return TIRAY_STATUS_INVALID_ARGUMENT;
     uint8_t request_payload[2];
     append_le16_local(request_payload, group_id);
     uint8_t response_payload[TIRAY_PROTOCOL_MAX_PAYLOAD];
@@ -473,7 +557,7 @@ tiray_status_t tiray_set_config_group(tiray_sdk_t* sdk, uint16_t group_id,
                                        const tiray_config_item_t* items, size_t item_count) {
     if (sdk == NULL || items == NULL || item_count == 0u || item_count > 255u) return TIRAY_STATUS_INVALID_ARGUMENT;
     if (sdk->config.profile == TIRAY_SDK_PROFILE_EXTERNAL && group_id != 1u && group_id != 5u)
-        return TIRAY_STATUS_DEVICE_ERROR;
+        return TIRAY_STATUS_INVALID_ARGUMENT;
     uint8_t payload[TIRAY_PROTOCOL_MAX_PAYLOAD];
     if (2u + item_count * 8u > sizeof(payload)) return TIRAY_STATUS_INVALID_ARGUMENT;
     append_le16_local(payload, group_id);

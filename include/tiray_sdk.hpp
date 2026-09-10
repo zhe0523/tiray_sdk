@@ -67,6 +67,7 @@ public:
     tiray_status_t open() { return tiray_sdk_open(handle_); }
     void close() { tiray_sdk_close(handle_); }
     bool is_open() const { return tiray_sdk_is_open(handle_) != 0; }
+    uint32_t last_device_error() const { return tiray_sdk_last_device_error(handle_); }
     tiray_status_t ping() { return tiray_ping(handle_); }
     tiray_status_t reboot() { return tiray_reboot(handle_); }
     tiray_status_t status(tiray_device_status_t& value) { return tiray_get_status(handle_, &value); }
@@ -151,6 +152,7 @@ public:
     tiray_status_t open() { return tiray_pcie_open(handle_); }
     void close() { tiray_pcie_close(handle_); }
     tiray_status_t wait_frame(tiray_image_frame_t& frame) { return tiray_pcie_wait_frame(handle_, &frame); }
+    /* 回调在 SDK 线程；frame->data 返回后失效。运行中勿再 wait_frame。 */
     tiray_status_t start(tiray_pcie_frame_callback_t callback, void* user_data = nullptr) {
         return tiray_pcie_start(handle_, callback, user_data);
     }

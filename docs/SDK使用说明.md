@@ -1,4 +1,6 @@
-# TiRay 43108 SDK 使用说明
+# TiRay 43108 SDK 使用说明（内部）
+
+本文档不随客户安装包发布。客户请使用 `docs/customer/`。
 
 ## 1. SDK 范围
 

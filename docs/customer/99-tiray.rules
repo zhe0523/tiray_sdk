@@ -1,0 +1,7 @@
+# 将本文件复制到 /etc/udev/rules.d/ 后执行：
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# 把 MODE/GROUP 改成现场实际用户组。
+
+KERNEL=="ttyWCH*", MODE="0660", GROUP="dialout"
+KERNEL=="idma0_event_0", MODE="0660", GROUP="dialout"
+KERNEL=="idma0_c2h_0", MODE="0660", GROUP="dialout"

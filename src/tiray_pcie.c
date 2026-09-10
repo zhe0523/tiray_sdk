@@ -23,10 +23,15 @@
 struct tiray_pcie_receiver {
     tiray_pcie_config_t config;
 #ifndef _WIN32
+    char* event_device_storage;
+    char* c2h_device_storage;
     char bar0_resource_storage[PATH_MAX];
     int event_fd;
     int c2h_fd;
+    int wake_r;
+    int wake_w;
     pthread_t worker;
+    pthread_mutex_t mutex;
     int running;
     int worker_started;
     tiray_pcie_frame_callback_t callback;
@@ -80,6 +85,13 @@ static int find_bar0_resource(char* output, size_t capacity) {
     closedir(directory);
     return -1;
 }
+
+static void close_wake(tiray_pcie_receiver_t* receiver) {
+    if (receiver->wake_r >= 0) close(receiver->wake_r);
+    if (receiver->wake_w >= 0) close(receiver->wake_w);
+    receiver->wake_r = -1;
+    receiver->wake_w = -1;
+}
 #endif
 
 tiray_pcie_receiver_t* tiray_pcie_create(const tiray_pcie_config_t* config) {
@@ -91,15 +103,45 @@ tiray_pcie_receiver_t* tiray_pcie_create(const tiray_pcie_config_t* config) {
     if (receiver == NULL) return NULL;
     receiver->config = defaults;
 #ifndef _WIN32
-    if (defaults.bar0_resource == NULL) {
-        if (find_bar0_resource(receiver->bar0_resource_storage, sizeof(receiver->bar0_resource_storage)) != 0) {
-            free(receiver);
-            return NULL;
-        }
+    receiver->event_device_storage = strdup(defaults.event_device);
+    receiver->c2h_device_storage = strdup(defaults.c2h_device);
+    if (receiver->event_device_storage == NULL || receiver->c2h_device_storage == NULL) {
+        free(receiver->event_device_storage);
+        free(receiver->c2h_device_storage);
+        free(receiver);
+        return NULL;
+    }
+    receiver->config.event_device = receiver->event_device_storage;
+    receiver->config.c2h_device = receiver->c2h_device_storage;
+    if (defaults.bar0_resource != NULL) {
+        (void)snprintf(receiver->bar0_resource_storage, sizeof(receiver->bar0_resource_storage),
+                       "%s", defaults.bar0_resource);
         receiver->config.bar0_resource = receiver->bar0_resource_storage;
+    } else {
+        receiver->config.bar0_resource = NULL;
     }
     receiver->event_fd = -1;
     receiver->c2h_fd = -1;
+    receiver->wake_r = -1;
+    receiver->wake_w = -1;
+    if (pthread_mutex_init(&receiver->mutex, NULL) != 0) {
+        free(receiver->event_device_storage);
+        free(receiver->c2h_device_storage);
+        free(receiver);
+        return NULL;
+    }
+    int wake[2];
+    if (pipe(wake) != 0) {
+        pthread_mutex_destroy(&receiver->mutex);
+        free(receiver->event_device_storage);
+        free(receiver->c2h_device_storage);
+        free(receiver);
+        return NULL;
+    }
+    receiver->wake_r = wake[0];
+    receiver->wake_w = wake[1];
+    (void)fcntl(receiver->wake_r, F_SETFL, O_NONBLOCK);
+    (void)fcntl(receiver->wake_w, F_SETFL, O_NONBLOCK);
 #endif
     return receiver;
 }
@@ -118,6 +160,12 @@ void tiray_pcie_close(tiray_pcie_receiver_t* receiver) {
 void tiray_pcie_destroy(tiray_pcie_receiver_t* receiver) {
     if (receiver == NULL) return;
     tiray_pcie_close(receiver);
+#ifndef _WIN32
+    close_wake(receiver);
+    pthread_mutex_destroy(&receiver->mutex);
+    free(receiver->event_device_storage);
+    free(receiver->c2h_device_storage);
+#endif
     free(receiver);
 }
 
@@ -127,6 +175,11 @@ tiray_status_t tiray_pcie_open(tiray_pcie_receiver_t* receiver) {
     return TIRAY_STATUS_IO_ERROR;
 #else
     if (receiver->event_fd >= 0 && receiver->c2h_fd >= 0) return TIRAY_STATUS_OK;
+    if (receiver->config.bar0_resource == NULL) {
+        if (find_bar0_resource(receiver->bar0_resource_storage, sizeof(receiver->bar0_resource_storage)) != 0)
+            return TIRAY_STATUS_IO_ERROR;
+        receiver->config.bar0_resource = receiver->bar0_resource_storage;
+    }
     receiver->event_fd = open(receiver->config.event_device, O_RDONLY | O_NONBLOCK);
     if (receiver->event_fd < 0) return TIRAY_STATUS_IO_ERROR;
     receiver->c2h_fd = open(receiver->config.c2h_device, O_RDONLY);
@@ -140,6 +193,7 @@ static tiray_status_t read_bar0(tiray_pcie_receiver_t* receiver, tiray_image_fra
 #ifdef _WIN32
     (void)receiver; (void)frame; (void)c2h_offset; return TIRAY_STATUS_IO_ERROR;
 #else
+    if (receiver->config.bar0_resource == NULL) return TIRAY_STATUS_NOT_OPEN;
     int fd = open(receiver->config.bar0_resource, O_RDONLY);
     if (fd < 0) return TIRAY_STATUS_IO_ERROR;
     const uint8_t* base = (const uint8_t*)mmap(NULL, BAR0_SIZE, PROT_READ, MAP_SHARED, fd, 0);
@@ -182,10 +236,31 @@ tiray_status_t tiray_pcie_wait_frame(tiray_pcie_receiver_t* receiver, tiray_imag
     return TIRAY_STATUS_IO_ERROR;
 #else
     if (receiver->event_fd < 0 || receiver->c2h_fd < 0) return TIRAY_STATUS_NOT_OPEN;
-    struct pollfd pfd = {receiver->event_fd, POLLIN, 0};
+    pthread_mutex_lock(&receiver->mutex);
+    if (receiver->worker_started && !pthread_equal(pthread_self(), receiver->worker)) {
+        pthread_mutex_unlock(&receiver->mutex);
+        return TIRAY_STATUS_BUSY;
+    }
+    pthread_mutex_unlock(&receiver->mutex);
+
+    struct pollfd pfds[2];
+    pfds[0].fd = receiver->event_fd;
+    pfds[0].events = POLLIN;
+    pfds[0].revents = 0;
+    pfds[1].fd = receiver->wake_r;
+    pfds[1].events = POLLIN;
+    pfds[1].revents = 0;
     const int timeout = receiver->config.wait_timeout_ms > 0u ? (int)receiver->config.wait_timeout_ms : -1;
-    if (poll(&pfd, 1, timeout) == 0) return TIRAY_STATUS_TIMEOUT;
-    if ((pfd.revents & POLLIN) == 0) return TIRAY_STATUS_IO_ERROR;
+    const int ready = poll(pfds, 2, timeout);
+    if (ready == 0) return TIRAY_STATUS_TIMEOUT;
+    if (ready < 0 && errno == EINTR) return TIRAY_STATUS_TIMEOUT;
+    if (ready < 0) return TIRAY_STATUS_IO_ERROR;
+    if ((pfds[1].revents & POLLIN) != 0) {
+        char drain[16];
+        while (read(receiver->wake_r, drain, sizeof(drain)) > 0) {}
+        return TIRAY_STATUS_TIMEOUT;
+    }
+    if ((pfds[0].revents & POLLIN) == 0) return TIRAY_STATUS_IO_ERROR;
     uint32_t event_value = 0u;
     if (read(receiver->event_fd, &event_value, sizeof(event_value)) != (ssize_t)sizeof(event_value)) return TIRAY_STATUS_IO_ERROR;
     (void)event_value;
@@ -210,15 +285,21 @@ tiray_status_t tiray_pcie_wait_frame(tiray_pcie_receiver_t* receiver, tiray_imag
 #ifndef _WIN32
 static void* pcie_worker(void* argument) {
     tiray_pcie_receiver_t* receiver = (tiray_pcie_receiver_t*)argument;
-    uint8_t* data = (uint8_t*)malloc(3072u * 7680u * 2u);
-    if (data == NULL) { receiver->running = 0; return NULL; }
-    while (receiver->running) {
+    const size_t capacity = (size_t)receiver->config.fallback_rows *
+                            (size_t)receiver->config.fallback_columns * 2u;
+    uint8_t* data = (uint8_t*)malloc(capacity);
+    if (data == NULL) {
+        __sync_lock_release(&receiver->running);
+        return NULL;
+    }
+    while (__sync_fetch_and_add(&receiver->running, 0) != 0) {
         tiray_image_frame_t frame;
         memset(&frame, 0, sizeof(frame));
         frame.data = data;
-        frame.data_capacity = 3072u * 7680u * 2u;
+        frame.data_capacity = capacity;
         const tiray_status_t status = tiray_pcie_wait_frame(receiver, &frame);
-        if (status == TIRAY_STATUS_OK && receiver->running && receiver->callback != NULL)
+        if (status == TIRAY_STATUS_OK && __sync_fetch_and_add(&receiver->running, 0) != 0 &&
+            receiver->callback != NULL)
             receiver->callback(&frame, receiver->callback_user_data);
     }
     free(data);
@@ -233,14 +314,22 @@ tiray_status_t tiray_pcie_start(tiray_pcie_receiver_t* receiver,
     (void)user_data; return TIRAY_STATUS_IO_ERROR;
 #else
     if (receiver->event_fd < 0 || receiver->c2h_fd < 0) return TIRAY_STATUS_NOT_OPEN;
-    if (receiver->running) return TIRAY_STATUS_BUSY;
+    pthread_mutex_lock(&receiver->mutex);
+    if (receiver->running) {
+        pthread_mutex_unlock(&receiver->mutex);
+        return TIRAY_STATUS_BUSY;
+    }
     receiver->callback = callback;
     receiver->callback_user_data = user_data;
-    receiver->running = 1;
+    __sync_lock_test_and_set(&receiver->running, 1);
     if (pthread_create(&receiver->worker, NULL, pcie_worker, receiver) != 0) {
-        receiver->running = 0; receiver->callback = NULL; return TIRAY_STATUS_INTERNAL_ERROR;
+        __sync_lock_release(&receiver->running);
+        receiver->callback = NULL;
+        pthread_mutex_unlock(&receiver->mutex);
+        return TIRAY_STATUS_INTERNAL_ERROR;
     }
     receiver->worker_started = 1;
+    pthread_mutex_unlock(&receiver->mutex);
     return TIRAY_STATUS_OK;
 #endif
 }
@@ -248,13 +337,23 @@ tiray_status_t tiray_pcie_start(tiray_pcie_receiver_t* receiver,
 void tiray_pcie_stop(tiray_pcie_receiver_t* receiver) {
     if (receiver == NULL) return;
 #ifndef _WIN32
-    receiver->running = 0;
-    if (receiver->worker_started) {
-        (void)pthread_join(receiver->worker, NULL);
-        receiver->worker_started = 0;
+    pthread_mutex_lock(&receiver->mutex);
+    __sync_lock_release(&receiver->running);
+    if (receiver->wake_w >= 0) {
+        const char byte = 1;
+        (void)write(receiver->wake_w, &byte, 1);
     }
-    receiver->callback = NULL;
-    receiver->callback_user_data = NULL;
+    const int started = receiver->worker_started;
+    pthread_t worker = receiver->worker;
+    pthread_mutex_unlock(&receiver->mutex);
+    if (started) {
+        (void)pthread_join(worker, NULL);
+        pthread_mutex_lock(&receiver->mutex);
+        receiver->worker_started = 0;
+        receiver->callback = NULL;
+        receiver->callback_user_data = NULL;
+        pthread_mutex_unlock(&receiver->mutex);
+    }
 #endif
 }
 
@@ -262,6 +361,6 @@ int tiray_pcie_is_running(const tiray_pcie_receiver_t* receiver) {
 #ifdef _WIN32
     (void)receiver; return 0;
 #else
-    return receiver != NULL && receiver->running != 0;
+    return receiver != NULL && __sync_fetch_and_add((int*)&receiver->running, 0) != 0;
 #endif
 }
