@@ -86,6 +86,31 @@ if(TIRAY_SDK_BUILD_HOST)
     endif()
 endif()
 
+option(TIRAY_SDK_BUILD_HOST_GUI "Build tiray_host_gui Qt maintenance GUI (Kylin: Qt5/Qt6 Widgets)" OFF)
+if(TIRAY_SDK_BUILD_HOST_GUI)
+    enable_language(CXX)
+    find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+    add_executable(tiray_host_gui
+        tools/tiray_host/gui/main.cpp
+        tools/tiray_host/gui/MainWindow.cpp
+        tools/tiray_host/gui/MainWindow.h
+        tools/tiray_host/gui/SdkWorker.cpp
+        tools/tiray_host/gui/SdkWorker.h
+        tools/tiray_host/gui/PcieMonitor.cpp
+        tools/tiray_host/gui/PcieMonitor.h
+        tools/tiray_host/gui/ImageView.cpp
+        tools/tiray_host/gui/ImageView.h
+    )
+    set_target_properties(tiray_host_gui PROPERTIES AUTOMOC ON)
+    target_link_libraries(tiray_host_gui PRIVATE tiray_sdk Qt${QT_VERSION_MAJOR}::Widgets)
+    target_include_directories(tiray_host_gui PRIVATE include tools/tiray_host/gui)
+    target_compile_features(tiray_host_gui PRIVATE cxx_std_17)
+    if(NOT MSVC)
+        target_compile_options(tiray_host_gui PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 option(TIRAY_SDK_BUILD_EXAMPLES "Build SDK examples" OFF)
 if(TIRAY_SDK_BUILD_EXAMPLES)
     enable_language(CXX)

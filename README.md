@@ -24,11 +24,15 @@ cmake -S . -B build -DTIRAY_SDK_INTERNAL_BUILD=ON -DTIRAY_SDK_BUILD_EXAMPLES=ON
 维护上位机 `tiray_host`（依赖 SDK 公共 API 的维护/回归工具，默认关闭，不进客户包）：
 
 ```bash
+# 命令行版（回归脚本用）
 cmake -S . -B build -DTIRAY_SDK_BUILD_HOST=ON
-cmake --build build   # 目标 tiray_host，用法见 tools/tiray_host/README.md
+
+# Qt 界面版（维护主用，Kylin 上 Qt5/Qt6 均可，见 tools/tiray_host/README.md）
+cmake -S . -B build -DTIRAY_SDK_BUILD_HOST=ON -DTIRAY_SDK_BUILD_HOST_GUI=ON
+cmake --build build   # 目标 tiray_host / tiray_host_gui
 ```
 
-研发自有协议栈工具 `pa_host` / `pa_controller` 不在本仓库；`tiray_host` 只用于维护和 SDK 回归。
+研发自有协议栈工具 `pa_host`（见 `pa_host/` 目录）/ `pa_controller` 不并入本工具；`tiray_host` 只用于维护和 SDK 回归，其界面布局参考 `pa_host`。
 
 客户交付包：
 
